@@ -1,0 +1,11 @@
+{
+    "userName": "Bro",
+    "speechStyle": "casual_bro",
+    "textStyle": "chill_lowercase",
+    "autonomyMode": "proactive_doer",
+    "learnedWords": ["bro", "bet", "say less", "let's cook"],
+    "catchphrases": ["Say less, bro.", "On it.", "Bet."],
+    "favoriteApps": ["chrome", "notepad", "explorer"],
+    "onboardingCompleted": false,
+    "lastInteraction": null
+}

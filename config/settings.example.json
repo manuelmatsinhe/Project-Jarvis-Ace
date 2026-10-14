@@ -1,0 +1,8 @@
+{
+    "corner": "TR",
+    "displayMode": "island",
+    "voiceEnabled": true,
+    "nudgeMinutes": 20,
+    "aiApiKey": "",
+    "aiModel": "gemini-2.5-flash"
+}

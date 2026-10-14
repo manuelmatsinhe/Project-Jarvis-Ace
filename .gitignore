@@ -1,0 +1,23 @@
+# Personal / secret data - never commit
+config/settings.json
+config/profile.json
+config/memory.json
+
+# Runtime files
+ipc/
+*.log
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.venv*/
+
+
+*.exe
