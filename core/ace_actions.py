@@ -1,5 +1,11 @@
 """
-Ace PC Actions Engine - Desktop automation and system control
+Ace PC Actions Engine - Complete Computer Control & Automation
+Gives Ace full liberty on the PC:
+- Keystrokes, shortcuts, hotkeys, text typing
+- Mouse movements, clicks, double-clicks, dragging, scrolling
+- Shell execution (PowerShell / CMD / scripts)
+- Window & Application management
+- System settings (volume, screenshot, lock)
 """
 import os
 import sys
@@ -8,11 +14,10 @@ import subprocess
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple, List
 
 try:
     import pyautogui
-    # Configure pyautogui failsafe
     pyautogui.FAILSAFE = False
 except ImportError:
     pyautogui = None
@@ -70,37 +75,112 @@ APP_ALIASES = {
     "snipping tool": "ms-screenclip:",
 }
 
-def type_text(text: str, delay_ms: int = 15) -> None:
+# --- Keyboard Actions ---
+
+def type_text(text: str, delay_ms: int = 15) -> str:
+    """Type text simulating human or rapid keystrokes."""
     if not text or not pyautogui:
-        return
+        return "Cannot type: text empty or pyautogui missing."
     interval = max(0.005, delay_ms / 1000.0)
     pyautogui.write(text, interval=interval)
+    return f"Typed: '{text}'"
 
-def send_key_combo(combo: str) -> None:
-    if not pyautogui or not combo:
-        return
-    c = combo.strip().lower()
-    mapping = {
-        "enter": ["enter"],
-        "tab": ["tab"],
-        "copy": ["ctrl", "c"],
-        "paste": ["ctrl", "v"],
-        "cut": ["ctrl", "x"],
-        "select all": ["ctrl", "a"],
-        "save": ["ctrl", "s"],
-        "undo": ["ctrl", "z"],
-        "redo": ["ctrl", "y"],
-        "new tab": ["ctrl", "t"],
-        "close tab": ["ctrl", "w"],
-        "escape": ["esc"],
-        "close window": ["alt", "f4"],
-        "refresh": ["f5"],
-        "find": ["ctrl", "f"]
-    }
-    keys = mapping.get(c, [c])
-    pyautogui.hotkey(*keys)
+def press_key(key: str) -> str:
+    """Press a single key (e.g., enter, space, esc, backspace)."""
+    if not pyautogui:
+        return "PyAutoGUI not available."
+    k = key.strip().lower()
+    pyautogui.press(k)
+    return f"Pressed '{k}'"
+
+def hotkey(*keys) -> str:
+    """Simulate key combinations (e.g. 'ctrl', 'c' or 'win', 'd')."""
+    if not pyautogui:
+        return "PyAutoGUI not available."
+    cleaned = [k.strip().lower() for k in keys if k]
+    pyautogui.hotkey(*cleaned)
+    return f"Triggered shortcut: {'+'.join(cleaned)}"
+
+# --- Mouse Actions ---
+
+def move_mouse(x: int, y: int, duration: float = 0.2) -> str:
+    """Move cursor smoothly to coordinates (x, y)."""
+    if not pyautogui:
+        return "PyAutoGUI not available."
+    pyautogui.moveTo(x, y, duration=duration)
+    return f"Moved mouse to ({x}, {y})"
+
+def click(x: Optional[int] = None, y: Optional[int] = None, button: str = "left", clicks: int = 1) -> str:
+    """Click mouse button at current or specified position."""
+    if not pyautogui:
+        return "PyAutoGUI not available."
+    if x is not None and y is not None:
+        pyautogui.click(x=x, y=y, button=button, clicks=clicks)
+        return f"Clicked {button} at ({x}, {y}) {clicks} time(s)"
+    else:
+        pyautogui.click(button=button, clicks=clicks)
+        return f"Clicked {button} {clicks} time(s)"
+
+def right_click(x: Optional[int] = None, y: Optional[int] = None) -> str:
+    """Right-click at position."""
+    return click(x, y, button="right")
+
+def double_click(x: Optional[int] = None, y: Optional[int] = None) -> str:
+    """Double-click at position."""
+    return click(x, y, button="left", clicks=2)
+
+def drag_mouse(x: int, y: int, duration: float = 0.5) -> str:
+    """Drag mouse with left button held down to (x, y)."""
+    if not pyautogui:
+        return "PyAutoGUI not available."
+    pyautogui.dragTo(x, y, duration=duration, button='left')
+    return f"Dragged mouse to ({x}, {y})"
+
+def scroll(amount: int) -> str:
+    """Scroll wheel: positive = up, negative = down."""
+    if not pyautogui:
+        return "PyAutoGUI not available."
+    pyautogui.scroll(amount)
+    dir_str = "up" if amount > 0 else "down"
+    return f"Scrolled {dir_str} by {abs(amount)}"
+
+def get_mouse_position() -> Tuple[int, int]:
+    """Get current mouse cursor coordinates."""
+    if not pyautogui:
+        return (0, 0)
+    pos = pyautogui.position()
+    return (pos.x, pos.y)
+
+def get_screen_size() -> Tuple[int, int]:
+    """Get resolution (width, height) of primary monitor."""
+    if not pyautogui:
+        return (1920, 1080)
+    size = pyautogui.size()
+    return (size.width, size.height)
+
+# --- System & Shell Execution ---
+
+def run_shell(command: str) -> str:
+    """Execute raw PowerShell or CMD command on the system with full liberty."""
+    if not command or not command.strip():
+        return "No command provided."
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        out = proc.stdout.strip()
+        err = proc.stderr.strip()
+        if err and not out:
+            return f"Error: {err}"
+        return out or "Command executed successfully (no output)."
+    except Exception as e:
+        return f"Execution failed: {e}"
 
 def open_target(target: str) -> str:
+    """Smart launcher for applications, URLs, or folders."""
     if not target or not target.strip():
         return "Open what, bro?"
     t = target.strip().strip('"').rstrip('.!?')
@@ -115,7 +195,7 @@ def open_target(target: str) -> str:
     if key in APP_ALIASES:
         t = APP_ALIASES[key]
 
-    # Check for web address
+    # Web URL
     if any(t.endswith(ext) for ext in [".com", ".org", ".net", ".io", ".dev", ".ai", ".co", ".app", ".tv", ".gg"]):
         if not t.startswith("http://") and not t.startswith("https://"):
             t = f"https://{t}"
@@ -124,14 +204,13 @@ def open_target(target: str) -> str:
         webbrowser.open(t)
         return f"Opened {target} in browser."
 
-    # Windows shell execute
+    # Windows native start
     try:
         os.startfile(t)
         return f"Opened {target}."
     except Exception:
         pass
 
-    # Try subprocess run
     try:
         subprocess.Popen(t, shell=True)
         return f"Opened {target}."
@@ -139,12 +218,13 @@ def open_target(target: str) -> str:
         return f"Couldn't launch '{target}': {e}"
 
 def set_volume(action: str, steps: int = 5) -> str:
+    """Adjust system volume: up, down, mute."""
     if not pyautogui:
         return "Audio controls unavailable."
-    act = action.lower()
+    act = action.lower().strip()
     if act == "mute":
         pyautogui.press("volumemute")
-        return "Muted audio."
+        return "Toggled mute."
     elif act == "down":
         for _ in range(steps):
             pyautogui.press("volumedown")
@@ -153,14 +233,15 @@ def set_volume(action: str, steps: int = 5) -> str:
         for _ in range(steps):
             pyautogui.press("volumeup")
         return f"Turned volume up {steps} steps."
-    return "Unknown volume command."
+    return "Unknown volume action."
 
 def take_screenshot() -> str:
+    """Capture full screen and save to Pictures folder."""
     pictures_dir = Path(os.path.expanduser("~/Pictures"))
     pictures_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = pictures_dir / f"Ace_Screenshot_{stamp}.png"
-    
+
     if ImageGrab:
         img = ImageGrab.grab()
         img.save(str(path))
@@ -170,7 +251,17 @@ def take_screenshot() -> str:
         return str(path)
     return "Screenshot tool unavailable."
 
+def lock_workstation() -> str:
+    """Lock the Windows desktop session."""
+    try:
+        import ctypes
+        ctypes.windll.user32.LockWorkStation()
+        return "Workstation locked."
+    except Exception as e:
+        return f"Lock failed: {e}"
+
 def get_pc_metrics() -> Dict[str, Any]:
+    """Retrieve live CPU, RAM, and Battery percentages."""
     metrics = {"cpu": "?", "ram_used_gb": 0, "ram_total_gb": 0, "ram_percent": 0, "battery": None}
     try:
         import psutil
@@ -183,7 +274,6 @@ def get_pc_metrics() -> Dict[str, Any]:
         if bat:
             metrics["battery"] = int(bat.percent)
     except ImportError:
-        # Fallback via PowerShell CIM instance if psutil not installed
         try:
             cmd = "Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory | ConvertTo-Json"
             out = subprocess.check_output(["powershell", "-NoProfile", "-Command", cmd], text=True)

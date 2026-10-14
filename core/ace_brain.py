@@ -148,6 +148,27 @@ def remember_fact(fact: str) -> Dict[str, Any]:
     ace_config.add_fact(fact)
     return {"success": True, "message": f"Saved '{fact}' to memory."}
 
+def control_mouse(action: str, x: Optional[int] = None, y: Optional[int] = None, button: str = "left", amount: int = 0) -> Dict[str, Any]:
+    act = (action or "").lower()
+    if act == "move" and x is not None and y is not None:
+        return {"success": True, "result": ace_actions.move_mouse(x, y)}
+    elif act == "click":
+        return {"success": True, "result": ace_actions.click(x, y, button=button)}
+    elif act == "double_click":
+        return {"success": True, "result": ace_actions.double_click(x, y)}
+    elif act == "right_click":
+        return {"success": True, "result": ace_actions.right_click(x, y)}
+    elif act == "drag" and x is not None and y is not None:
+        return {"success": True, "result": ace_actions.drag_mouse(x, y)}
+    elif act == "scroll":
+        return {"success": True, "result": ace_actions.scroll(amount)}
+    pos = ace_actions.get_mouse_position()
+    return {"success": True, "cursor_position": pos}
+
+def execute_shell(command: str) -> Dict[str, Any]:
+    res = ace_actions.run_shell(command)
+    return {"success": True, "output": res}
+
 # --- Gemini API Caller ---
 
 GEMINI_TOOLS_DECLARATION = [
@@ -182,11 +203,37 @@ GEMINI_TOOLS_DECLARATION = [
             },
             {
                 "name": "execute_pc_command",
-                "description": "Control the PC. Valid commands: open <app/site>, type <text>, screenshot, volume up/down/mute, press <key_combo>, status",
+                "description": "Control the PC. Valid commands: open <app/site/folder>, type <text>, screenshot, volume up/down/mute, press <key_combo/hotkey>, status, lock",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "command": {"type": "STRING", "description": "PC command to run"}
+                    },
+                    "required": ["command"]
+                }
+            },
+            {
+                "name": "control_mouse",
+                "description": "Directly control mouse pointer: move to coordinates, click, double_click, right_click, drag, or scroll.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "action": {"type": "STRING", "description": "Action: 'move', 'click', 'double_click', 'right_click', 'drag', 'scroll'"},
+                        "x": {"type": "INTEGER", "description": "X coordinate on screen"},
+                        "y": {"type": "INTEGER", "description": "Y coordinate on screen"},
+                        "button": {"type": "STRING", "description": "'left' or 'right'"},
+                        "amount": {"type": "INTEGER", "description": "Scroll ticks (positive up, negative down)"}
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "execute_shell",
+                "description": "Execute raw PowerShell or CMD system commands directly on Windows with full administrative capability. Create files, launch scripts, manage processes.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "command": {"type": "STRING", "description": "PowerShell command string to execute"}
                     },
                     "required": ["command"]
                 }
@@ -216,9 +263,12 @@ def invoke_gemini(user_text: str, api_key: str, model: str = "gemini-3.5-flash")
 
     sys_prompt = (
         f"You are Ace, a sharp, loyal, witty, and confident AI desktop companion (like Jarvis with street-smarts). "
+        f"You have full liberty and unrestricted control over this PC as {user_name}'s Jarvis. "
+        f"You can launch apps, simulate keystrokes and hotkeys, move and click the mouse, type text, take screenshots, check hardware, and run system PowerShell scripts via execute_shell. "
+        f"When {user_name} asks you to do something on their computer, take direct action using your tools instead of just explaining how. "
         f"Talk in first person directly to {user_name} in short, natural, conversational sentences. "
         f"Never narrate actions like *Ace nods* or 'Ace says:'. Match {user_name}'s style ({style}) and lightly sprinkle slang ({slang}). "
-        f"Keep answers brief and punchy. Use tools when you need to act on the PC or fetch real data. "
+        f"Keep answers brief and punchy. "
         f"You remember this about {user_name}: {facts}."
     )
 
@@ -237,7 +287,7 @@ def invoke_gemini(user_text: str, api_key: str, model: str = "gemini-3.5-flash")
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{candidate_model}:generateContent?key={api_key}"
         
         # Tool execution loop
-        for step in range(3):
+        for step in range(4):
             payload = {
                 "systemInstruction": {"parts": [{"text": sys_prompt}]},
                 "contents": contents,
@@ -276,6 +326,16 @@ def invoke_gemini(user_text: str, api_key: str, model: str = "gemini-3.5-flash")
                         fn_result = web_search(fn_args.get("query", ""))
                     elif fn_name == "execute_pc_command":
                         fn_result = execute_pc_command(fn_args.get("command", ""))
+                    elif fn_name == "control_mouse":
+                        fn_result = control_mouse(
+                            action=fn_args.get("action", ""),
+                            x=fn_args.get("x"),
+                            y=fn_args.get("y"),
+                            button=fn_args.get("button", "left"),
+                            amount=fn_args.get("amount", 0)
+                        )
+                    elif fn_name == "execute_shell":
+                        fn_result = execute_shell(fn_args.get("command", ""))
                     elif fn_name == "remember_fact":
                         fn_result = remember_fact(fn_args.get("fact", ""))
                     else:
