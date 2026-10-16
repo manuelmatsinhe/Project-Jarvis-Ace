@@ -67,7 +67,8 @@ switch -Regex ($raw) {
         Write-Host ""
         Write-Host "  ACE // Project Jarvis" -ForegroundColor Cyan
         Write-Host "  ---------------------" -ForegroundColor DarkCyan
-        Write-Host "  ace start | stop | restart     Launch / close Ace"
+        Write-Host "  ace start | pill | gui         Launch the floating pill HUD (detached)"
+        Write-Host "  ace stop | restart             Close / restart the pill HUD"
         Write-Host "  ace <anything>                 Talk to him or give an order (he replies here)"
         Write-Host "  ace chat                       Live chat session in this terminal"
         Write-Host "  ace open spotify | search x | play lofi | type hello | screenshot | status"
@@ -83,15 +84,15 @@ switch -Regex ($raw) {
         Write-Host ""
         break
     }
-    '^start$'   { if (Test-AceRunning) { Write-Host "[ACE] Already on screen." -ForegroundColor Yellow } else { Start-Ace; Write-Host "[ACE] Online." -ForegroundColor Green }; break }
-    '^(stop|quit|exit)$' {
-        if (Test-AceRunning) { Stop-Process -Id ([int](Get-Content $lockFile -Raw).Trim()) -Force; Remove-Item $lockFile -Force -ErrorAction SilentlyContinue; Write-Host "[ACE] Asleep." -ForegroundColor Yellow }
-        else { Write-Host "[ACE] Not running." -ForegroundColor Gray }
+    '^(start|pill|gui|restart)$' {
+        & "C:\Users\hp\.venv_ace\Scripts\python.exe" (Join-Path $projectRoot "ace.py") $matches[1]
         break
     }
-    '^restart$' {
-        if (Test-AceRunning) { Stop-Process -Id ([int](Get-Content $lockFile -Raw).Trim()) -Force; Remove-Item $lockFile -Force -ErrorAction SilentlyContinue; Start-Sleep 1 }
-        Start-Ace; Write-Host "[ACE] Restarted." -ForegroundColor Green; break
+    '^(stop|quit|exit)$' {
+        & "C:\Users\hp\.venv_ace\Scripts\python.exe" (Join-Path $projectRoot "ace.py") stop
+        # Also stop the legacy PowerShell agent if it is still running
+        if (Test-AceRunning) { Stop-Process -Id ([int](Get-Content $lockFile -Raw).Trim()) -Force; Remove-Item $lockFile -Force -ErrorAction SilentlyContinue; Write-Host "[ACE] Legacy agent stopped." -ForegroundColor Yellow }
+        break
     }
     '^(learn|interview|calibrate)$' { & powershell -NoProfile -ExecutionPolicy Bypass -File $interview; break }
     '^set-key\s+(\S+)$' { Set-Setting "aiApiKey" $matches[1]; Write-Host "[ACE] Key saved. Restarting Ace isn't needed - next message uses it." -ForegroundColor Green; break }
@@ -113,13 +114,12 @@ switch -Regex ($raw) {
         break
     }
     '^chat$' {
-        Write-Host "Chat with Ace. Type 'exit' to leave." -ForegroundColor Cyan
-        while ($true) {
-            $line = Read-Host "You"
-            if ($line -match '^(exit|quit|bye)$') { Write-Host "Ace: Later bro." -ForegroundColor Cyan; break }
-            if ($line.Trim()) { Send-Ace $line }
-        }
+        # Interactive Python session (same brain as the pill HUD)
+        & "C:\Users\hp\.venv_ace\Scripts\python.exe" (Join-Path $projectRoot "ace.py")
         break
     }
-    default { Send-Ace $raw }
+    default {
+        $env:PYTHONIOENCODING = "utf-8"
+        & "C:\Users\hp\.venv_ace\Scripts\python.exe" (Join-Path $projectRoot "ace.py") @ArgsList
+    }
 }

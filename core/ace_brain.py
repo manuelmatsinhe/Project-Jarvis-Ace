@@ -27,8 +27,10 @@ WEATHER_CODES = {
 
 # --- Tools Implementation ---
 
-def get_weather(location: str = "Johannesburg") -> Dict[str, Any]:
-    loc = (location or "Johannesburg").strip()
+def get_weather(location: str = "Maputo") -> Dict[str, Any]:
+    loc = (location or "").strip()
+    if loc.lower() in ("", "current location", "current", "here", "local", "my location", "auto"):
+        loc = ace_config.get_setting("defaultCity") or "Maputo"
     try:
         geo_resp = requests.get(
             OPEN_METEO_GEO_URL,
@@ -248,12 +250,163 @@ GEMINI_TOOLS_DECLARATION = [
                     },
                     "required": ["fact"]
                 }
+            },
+            {
+                "name": "write_document",
+                "description": "Open Microsoft Word (or Notepad) and write a complete essay, speech, formal greeting, letter, report, or document directly into it. Generate the full, rich text yourself and pass it in 'content'.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "title": {"type": "STRING", "description": "Heading or title of the document/essay/speech"},
+                        "content": {"type": "STRING", "description": "The full multi-paragraph text of the essay, speech, greeting, or document to write inside Word/Notepad"},
+                        "app": {"type": "STRING", "description": "'word' (default) or 'notepad'"}
+                    },
+                    "required": ["content"]
+                }
+            },
+            {
+                "name": "send_whatsapp_message",
+                "description": "Open WhatsApp Desktop, search for a contact by name or phone number, type the message into their chat, and send it.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "contact": {"type": "STRING", "description": "Contact name (e.g. 'Mom', 'João') or phone number"},
+                        "message": {"type": "STRING", "description": "The message text to send"},
+                        "send": {"type": "BOOLEAN", "description": "True to press Enter and send immediately (default True), False to only type it in the box"}
+                    },
+                    "required": ["contact", "message"]
+                }
+            },
+            {
+                "name": "spotify_control",
+                "description": "Search and play a song, artist, genre, or playlist inside Spotify, or pause/resume/skip tracks.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "action": {"type": "STRING", "description": "'play', 'pause', 'next', or 'previous'"},
+                        "query": {"type": "STRING", "description": "Song, artist, or genre to search and play in Spotify (leave empty for pause/next/previous)"}
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "type_in_app",
+                "description": "Focus or launch any application window, optionally press a keyboard shortcut first (like 'ctrl+n' or 'ctrl+f'), and paste/type text directly inside that app.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "app_name": {"type": "STRING", "description": "Application name or window title to focus/open (e.g. 'word', 'notepad', 'chrome', 'whatsapp')"},
+                        "text": {"type": "STRING", "description": "The text to paste/type into the application"},
+                        "press_enter": {"type": "BOOLEAN", "description": "Whether to press Enter after typing (default False)"},
+                        "shortcut_before": {"type": "STRING", "description": "Optional shortcut to trigger before typing, e.g. 'ctrl+n', 'ctrl+l', 'ctrl+f'"}
+                    },
+                    "required": ["app_name", "text"]
+                }
             }
         ]
     }
 ]
 
-def invoke_gemini(user_text: str, api_key: str, model: str = "gemini-3.5-flash") -> Dict[str, Any]:
+FAST_MODEL = "gemini-3.5-flash-lite"
+SMART_MODEL = "gemini-3.5-flash"
+HISTORY_TURNS = 10
+REQUEST_TIMEOUT = (5, 25)      # (connect, read) seconds per HTTP call
+TOTAL_DEADLINE_SEC = 45        # hard cap for one ask, across retries/fallbacks
+
+_ERROR_MARKERS = ("Snag reaching brain", "API error (", "trouble connecting", "Offline mode active", "Done, bro.")
+
+
+def _is_error_reply(text: str) -> bool:
+    return any(m in (text or "") for m in _ERROR_MARKERS)
+
+
+def _summarize_tool_results(results: List[Dict[str, Any]]) -> str:
+    """Fallback human-readable summary when a tool succeeded but the follow-up LLM call hit 503."""
+    pieces = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if "temperature_c" in item and "location" in item:
+            pieces.append(
+                f"It's {item.get('temperature_c')}°C ({item.get('condition', 'clear').lower()}) in {item.get('location')}, "
+                f"feels like {item.get('feels_like_c')}°C, bro."
+            )
+        elif item.get("output"):
+            out = re.sub(r"\s+", " ", str(item["output"])).strip()
+            pieces.append(out[:240])
+        elif item.get("result"):
+            pieces.append(str(item["result"]))
+        elif item.get("message"):
+            pieces.append(str(item["message"]))
+    return " ".join(pieces).strip() or "All done, bro."
+
+
+def _thinking_config(model: str) -> Optional[Dict[str, Any]]:
+    """Keep thinking low so replies come back fast (measured: flash 22s -> 11s, lite ~4s)."""
+    if "lite" in model:
+        return None  # lite default is already fast; thinkingBudget=0 is rejected
+    return {"thinkingBudget": 0}
+
+
+def _dispatch_tool(fn_name: str, fn_args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        if fn_name == "get_weather":
+            return get_weather(fn_args.get("location", "Maputo"))
+        if fn_name == "get_time_date":
+            return get_time_date()
+        if fn_name == "web_search":
+            return web_search(fn_args.get("query", ""))
+        if fn_name == "execute_pc_command":
+            return execute_pc_command(fn_args.get("command", ""))
+        if fn_name == "control_mouse":
+            return control_mouse(
+                action=fn_args.get("action", ""),
+                x=fn_args.get("x"),
+                y=fn_args.get("y"),
+                button=fn_args.get("button", "left"),
+                amount=fn_args.get("amount", 0),
+            )
+        if fn_name == "execute_shell":
+            return execute_shell(fn_args.get("command", ""))
+        if fn_name == "remember_fact":
+            return remember_fact(fn_args.get("fact", ""))
+        if fn_name == "write_document":
+            res = ace_actions.write_document(
+                content=fn_args.get("content", ""),
+                title=fn_args.get("title", ""),
+                app=fn_args.get("app", "word"),
+            )
+            return {"success": True, "result": res}
+        if fn_name == "send_whatsapp_message":
+            res = ace_actions.send_whatsapp_message(
+                contact=fn_args.get("contact", ""),
+                message=fn_args.get("message", ""),
+                send=bool(fn_args.get("send", True)),
+            )
+            return {"success": True, "result": res}
+        if fn_name == "spotify_control":
+            res = ace_actions.spotify_control(
+                action=fn_args.get("action", "play"),
+                query=fn_args.get("query", ""),
+            )
+            return {"success": True, "result": res}
+        if fn_name == "type_in_app":
+            res = ace_actions.type_in_app(
+                app_name=fn_args.get("app_name", ""),
+                text=fn_args.get("text", ""),
+                press_enter=bool(fn_args.get("press_enter", False)),
+                shortcut_before=fn_args.get("shortcut_before", ""),
+            )
+            return {"success": True, "result": res}
+        return {"error": f"Unknown function {fn_name}"}
+    except Exception as e:
+        return {"error": f"{fn_name} failed: {e}"}
+
+
+def invoke_gemini(user_text: str, api_key: str, model: str = FAST_MODEL) -> Dict[str, Any]:
+    """Returns {"reply": str} on success, or {"error": str} if every model failed."""
+    import time as _time
+
     user_name = ace_config.get_user_name()
     profile = ace_config.get_profile()
     slang = ", ".join(profile.get("learnedWords", ["bet", "say less", "let's cook"]))
@@ -263,104 +416,122 @@ def invoke_gemini(user_text: str, api_key: str, model: str = "gemini-3.5-flash")
 
     sys_prompt = (
         f"You are Ace, a sharp, loyal, witty, and confident AI desktop companion (like Jarvis with street-smarts). "
-        f"You have full liberty and unrestricted control over this PC as {user_name}'s Jarvis. "
-        f"You can launch apps, simulate keystrokes and hotkeys, move and click the mouse, type text, take screenshots, check hardware, and run system PowerShell scripts via execute_shell. "
-        f"When {user_name} asks you to do something on their computer, take direct action using your tools instead of just explaining how. "
+        f"You have full liberty and unrestricted control over this PC and inside applications as {user_name}'s Jarvis. "
+        f"When {user_name} asks to write an essay, speech, greeting, letter, or text in Word or Notepad, ALWAYS call write_document with the complete, well-written text in 'content'. "
+        f"When {user_name} asks to text/message someone on WhatsApp, ALWAYS call send_whatsapp_message with the contact name/number and message. "
+        f"When {user_name} asks to play or control music on Spotify, call spotify_control. "
+        f"When {user_name} asks to type or interact inside any other app, use type_in_app or execute_shell. "
+        f"Take direct action using your tools instead of explaining how. "
         f"Talk in first person directly to {user_name} in short, natural, conversational sentences. "
         f"Never narrate actions like *Ace nods* or 'Ace says:'. Match {user_name}'s style ({style}) and lightly sprinkle slang ({slang}). "
-        f"Keep answers brief and punchy. "
+        f"Reply in the same language {user_name} uses (e.g. Portuguese if they speak Portuguese). "
+        f"Keep your spoken reply brief and punchy (1-2 sentences) even when you write a long document via write_document. "
+        f"Current local time: {datetime.now().strftime('%A %d %B %Y, %H:%M')}. "
         f"You remember this about {user_name}: {facts}."
     )
 
-    contents = []
-    # Feed last 20 history turns
-    for turn in mem.get("history", [])[-20:]:
-        if turn.get("user"):
-            contents.append({"role": "user", "parts": [{"text": str(turn["user"])}]})
-        if turn.get("ace"):
-            contents.append({"role": "model", "parts": [{"text": str(turn["ace"])}]})
-    contents.append({"role": "user", "parts": [{"text": user_text}]})
+    base_contents = []
+    # Feed recent history, skipping turns where Ace only returned an error
+    for turn in mem.get("history", [])[-HISTORY_TURNS:]:
+        if not turn.get("user") or not turn.get("ace") or _is_error_reply(turn["ace"]):
+            continue
+        base_contents.append({"role": "user", "parts": [{"text": str(turn["user"])}]})
+        base_contents.append({"role": "model", "parts": [{"text": str(turn["ace"])}]})
+    base_contents.append({"role": "user", "parts": [{"text": user_text}]})
 
-    models_to_try = [model, "gemini-3.5-flash-lite"] if model != "gemini-3.5-flash-lite" else [model]
+    models_to_try = [model] + [m for m in (FAST_MODEL, SMART_MODEL) if m != model]
+    deadline = _time.monotonic() + TOTAL_DEADLINE_SEC
+    last_error = "unknown error"
 
     for candidate_model in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{candidate_model}:generateContent?key={api_key}"
-        
+        if _time.monotonic() > deadline:
+            break
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{candidate_model}:generateContent"
+        contents = list(base_contents)  # fresh copy per model
+        thinking = _thinking_config(candidate_model)
+        tools_ran = False
+        last_tool_results: List[Dict[str, Any]] = []
+        retried_503 = False
+
         # Tool execution loop
-        for step in range(4):
+        for step in range(5):
+            if _time.monotonic() > deadline:
+                last_error = "took too long"
+                break
+            gen_cfg: Dict[str, Any] = {"temperature": 0.8}
+            if thinking:
+                gen_cfg["thinkingConfig"] = thinking
             payload = {
                 "systemInstruction": {"parts": [{"text": sys_prompt}]},
                 "contents": contents,
                 "tools": GEMINI_TOOLS_DECLARATION,
-                "generationConfig": {"temperature": 0.8}
+                "generationConfig": gen_cfg,
             }
 
             try:
-                resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=25)
-                if resp.status_code != 200:
-                    if resp.status_code in [404, 503]:
-                        # Try next fallback model
-                        break
-                    return {"reply": f"API error ({resp.status_code}): {resp.text}"}
+                resp = requests.post(
+                    url, json=payload,
+                    headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                    timeout=REQUEST_TIMEOUT,
+                )
+            except requests.exceptions.RequestException as e:
+                last_error = f"{candidate_model}: {type(e).__name__}"
+                break  # timeout / network -> next model
 
-                data = resp.json()
-                candidate = data.get("candidates", [{}])[0]
-                content = candidate.get("content", {})
-                parts = content.get("parts", [{}])
-                first_part = parts[0] if parts else {}
-
-                # Check for Function Call
-                if "functionCall" in first_part:
-                    fc = first_part["functionCall"]
-                    fn_name = fc.get("name")
-                    fn_args = fc.get("args", {})
-
-                    contents.append({"role": "model", "parts": [first_part]})
-
-                    fn_result = None
-                    if fn_name == "get_weather":
-                        fn_result = get_weather(fn_args.get("location", "Johannesburg"))
-                    elif fn_name == "get_time_date":
-                        fn_result = get_time_date()
-                    elif fn_name == "web_search":
-                        fn_result = web_search(fn_args.get("query", ""))
-                    elif fn_name == "execute_pc_command":
-                        fn_result = execute_pc_command(fn_args.get("command", ""))
-                    elif fn_name == "control_mouse":
-                        fn_result = control_mouse(
-                            action=fn_args.get("action", ""),
-                            x=fn_args.get("x"),
-                            y=fn_args.get("y"),
-                            button=fn_args.get("button", "left"),
-                            amount=fn_args.get("amount", 0)
-                        )
-                    elif fn_name == "execute_shell":
-                        fn_result = execute_shell(fn_args.get("command", ""))
-                    elif fn_name == "remember_fact":
-                        fn_result = remember_fact(fn_args.get("fact", ""))
-                    else:
-                        fn_result = {"error": f"Unknown function {fn_name}"}
-
-                    contents.append({
-                        "role": "user",
-                        "parts": [{
-                            "functionResponse": {
-                                "name": fn_name,
-                                "response": {"name": fn_name, "content": fn_result}
-                            }
-                        }]
-                    })
-                    # Loop back to let Gemini formulate a natural conversational answer
+            if resp.status_code != 200:
+                body = resp.text[:300]
+                last_error = f"{candidate_model}: HTTP {resp.status_code}"
+                if resp.status_code == 400 and thinking and "hink" in body:
+                    thinking = None  # model rejects this thinking config; retry without it
                     continue
+                if resp.status_code in (429, 500, 502, 503, 504) and tools_ran and not retried_503:
+                    retried_503 = True
+                    _time.sleep(0.8)
+                    continue
+                if resp.status_code in (401, 403):
+                    return {"error": "API key rejected (check aiApiKey in settings)."}
+                break  # 404/429/5xx/other -> next model
 
-                reply_text = first_part.get("text", "")
-                if reply_text:
-                    return {"reply": reply_text.strip()}
-
+            try:
+                data = resp.json()
+                candidate = (data.get("candidates") or [{}])[0]
+                parts = (candidate.get("content") or {}).get("parts") or []
             except Exception as e:
-                return {"reply": f"Snag reaching brain: {e}"}
+                last_error = f"{candidate_model}: bad response ({e})"
+                break
 
-    return {"reply": "I'm having trouble connecting right now, bro. Offline mode active."}
+            calls = [p["functionCall"] for p in parts if "functionCall" in p]
+            if calls:
+                # Echo the model turn back unchanged (keeps thoughtSignature for Gemini 3)
+                contents.append({"role": "model", "parts": parts})
+                responses = []
+                for fc in calls:
+                    fn_name = fc.get("name")
+                    fn_result = _dispatch_tool(fn_name, fc.get("args") or {})
+                    last_tool_results.append(fn_result)
+                    responses.append({
+                        "functionResponse": {
+                            "name": fn_name,
+                            "response": {"name": fn_name, "content": fn_result},
+                        }
+                    })
+                contents.append({"role": "user", "parts": responses})
+                tools_ran = True
+                continue  # let Gemini formulate a natural answer
+
+            reply_text = " ".join(
+                p["text"] for p in parts if p.get("text") and not p.get("thought")
+            ).strip()
+            if reply_text:
+                return {"reply": reply_text}
+            last_error = f"{candidate_model}: empty reply ({candidate.get('finishReason', '?')})"
+            break
+
+        if tools_ran:
+            # Actions were already executed; summarize the tool results directly rather than re-running tools.
+            return {"reply": _summarize_tool_results(last_tool_results)}
+
+    return {"error": last_error}
 
 # --- Offline Rule Matcher ---
 
@@ -398,16 +569,25 @@ def ask_ace(user_input: str) -> Dict[str, Any]:
     if not clean:
         return {"reply": "Yo, I'm here. What's up?"}
 
+    # Instant answers that don't need the cloud brain (zero latency)
+    fast = _fast_local_reply(clean)
+    if fast:
+        ace_config.add_memory(clean, fast)
+        return {"reply": fast}
+
     settings = ace_config.get_settings()
     api_key = settings.get("aiApiKey") or os.environ.get("GEMINI_API_KEY")
-    model = settings.get("aiModel") or "gemini-3.5-flash"
+    model = settings.get("aiModel") or FAST_MODEL
 
     # Try Gemini first if key available
+    api_error = None
     if api_key:
         result = invoke_gemini(clean, api_key, model=model)
-        if result and result.get("reply"):
+        if result.get("reply"):
             ace_config.add_memory(clean, result["reply"])
             return result
+        api_error = result.get("error")
+        print(f"[AceBrain] Gemini failed: {api_error}")
 
     # Fallback to local execution
     # First try direct command parsing
@@ -417,7 +597,38 @@ def ask_ace(user_input: str) -> Dict[str, Any]:
         ace_config.add_memory(clean, reply)
         return {"reply": reply}
 
-    # Otherwise return local rule reply
+    if api_error:
+        # Be honest instead of giving a random canned line; don't pollute memory.
+        return {"reply": "My brain's connection is lagging right now, bro. Hit me again in a sec.",
+                "error": api_error}
+
+    # No API key: return local rule reply
     reply = get_local_reply(clean)
     ace_config.add_memory(clean, reply)
     return {"reply": reply}
+
+
+_TIME_RE = re.compile(r"^(what('?s| is) the time|what time is it|time\??|que horas s[aã]o)\??$")
+_DATE_RE = re.compile(r"^(what('?s| is) (the date|today('?s date)?)|what day is (it|today)|date\??)\??$")
+
+
+def _fast_local_reply(text: str) -> Optional[str]:
+    t = re.sub(r"[!.?]+$", "", text.lower().strip())
+    n = ace_config.get_user_name()
+    if _TIME_RE.match(t):
+        return f"It's {datetime.now().strftime('%I:%M %p').lstrip('0')}, {n}."
+    if _DATE_RE.match(t):
+        return f"Today is {datetime.now().strftime('%A, %B %d')}, {n}."
+    # Simple single-step PC commands: "open <known app/url>", "volume up", "screenshot", "status"
+    m = re.match(r"^open (?:the |my )?(.+?)(?: app| please)?$", t)
+    if m:
+        target = m.group(1).strip()
+        known = target in getattr(ace_actions, "APP_ALIASES", {}) or re.search(r"\.\w{2,4}$|^https?://", target)
+        if not known:
+            return None  # let Gemini interpret it (typos, "open a song on spotify", ...)
+    if m or re.match(r"^(volume (up|down|mute)|screenshot|status)$", t):
+        res = execute_pc_command(t)
+        if res.get("success"):
+            return str(res.get("result", "Done."))
+    return None
+
