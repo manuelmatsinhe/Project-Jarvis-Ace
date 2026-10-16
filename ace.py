@@ -52,16 +52,19 @@ def start_hud():
     interpreter = str(pythonw if pythonw.exists() else sys.executable)
 
     flags = 0
+    startupinfo = None
     if os.name == "nt":
         flags = (subprocess.DETACHED_PROCESS
                  | subprocess.CREATE_NEW_PROCESS_GROUP
                  | subprocess.CREATE_NO_WINDOW)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.lpDesktop = r"WinSta0\Default"
 
     proc = subprocess.Popen(
         [interpreter, str(UI_SCRIPT)],
         cwd=str(PROJECT_ROOT),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=flags, close_fds=True,
+        creationflags=flags, startupinfo=startupinfo, close_fds=True,
     )
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(proc.pid))

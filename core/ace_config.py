@@ -26,7 +26,7 @@ DEFAULT_SETTINGS = {
     "autoNudgeIntervalSec": 120,
     "displayMode": "block",
     "nudgeMinutes": 20,
-    "aiModel": "gemini-3.5-flash",
+    "aiModel": "gemini-3.1-flash-lite",
 }
 
 DEFAULT_PROFILE = {

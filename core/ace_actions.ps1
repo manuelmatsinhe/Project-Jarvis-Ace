@@ -1,4 +1,4 @@
-﻿# Ace PC Actions Engine - hands on your PC
+# Ace PC Actions Engine - hands on your PC
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
 
@@ -23,19 +23,27 @@ $script:AceAppAliases = @{
     "settings" = "ms-settings:"; "task manager" = "taskmgr.exe"; "control panel" = "control.exe"
     "cmd" = "cmd.exe"; "command prompt" = "cmd.exe"; "powershell" = "powershell.exe"; "terminal" = "wt.exe"
     "chrome" = "chrome.exe"; "google chrome" = "chrome.exe"; "edge" = "msedge.exe"; "firefox" = "firefox.exe"
-    "browser" = "https://www.google.com"; "google" = "https://www.google.com"
-    "youtube" = "https://www.youtube.com"; "github" = "https://github.com"; "gmail" = "https://mail.google.com"
-    "chatgpt" = "https://chat.openai.com"; "netflix" = "https://www.netflix.com"
     "vscode" = "code"; "vs code" = "code"; "visual studio code" = "code"
     "word" = "winword.exe"; "excel" = "excel.exe"; "powerpoint" = "powerpnt.exe"; "outlook" = "outlook.exe"
     "spotify" = "spotify:"; "discord" = "discord:"; "whatsapp" = "whatsapp:"; "steam" = "steam:"
     "store" = "ms-windows-store:"; "camera" = "microsoft.windows.camera:"; "snipping tool" = "ms-screenclip:"
 }
 
+$script:AceWebFallbacks = @{
+    "browser" = "https://www.google.com"; "google" = "https://www.google.com"
+    "youtube" = "https://www.youtube.com"; "github" = "https://github.com"; "gmail" = "https://mail.google.com"
+    "chatgpt" = "https://chatgpt.com"; "netflix" = "https://www.netflix.com"
+}
+
 function Find-AceStartMenuApp {
     param ([string]$Name)
-    $dirs = @("$env:ProgramData\Microsoft\Windows\Start Menu\Programs", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs")
-    $links = Get-ChildItem -Path $dirs -Filter *.lnk -Recurse -ErrorAction SilentlyContinue
+    $dirs = @(
+        [Environment]::GetFolderPath("Desktop"),
+        [Environment]::GetFolderPath("CommonDesktopDirectory"),
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs"
+    ) | Where-Object { $_ -and (Test-Path $_) }
+    $links = Get-ChildItem -Path $dirs -Include *.lnk, *.url, *.appref-ms -Recurse -ErrorAction SilentlyContinue
     $hit = $links | Where-Object { $_.BaseName -ieq $Name } | Select-Object -First 1
     if (-not $hit) { $hit = $links | Where-Object { $_.BaseName -like "*$Name*" } | Sort-Object { $_.BaseName.Length } | Select-Object -First 1 }
     return $hit
@@ -45,18 +53,19 @@ function Invoke-AceOpen {
     param ([string]$Target)
     if ([string]::IsNullOrWhiteSpace($Target)) { return "Open what, bro?" }
     $t = $Target.Trim().Trim('"').TrimEnd('.', '!', '?')
-    $key = $t.ToLower() -replace '^(the|my|up)\s+', '' -replace '\s+(app|application|for me|please)$', ''
+    $key = $t.ToLower() -replace '^(the|my|up)\s+', '' -replace '\s+(shortcut|atalho|app|application|for me|please)$', ''
+
+    $lnk = Find-AceStartMenuApp $key
+    if ($lnk) {
+        try { Start-Process $lnk.FullName -ErrorAction Stop; return "Opened $($lnk.BaseName) shortcut." } catch {}
+    }
 
     if ($script:AceAppAliases.ContainsKey($key)) { $t = $script:AceAppAliases[$key] }
+    elseif ($script:AceWebFallbacks.ContainsKey($key)) { $t = $script:AceWebFallbacks[$key] }
 
     if ($t -match '^[\w\-]+\.(com|org|net|io|dev|ai|co|app|tv|gg)(/.*)?$') { $t = "https://$t" }
 
     try { Start-Process $t -ErrorAction Stop; return "Opened $Target." } catch {}
-
-    $lnk = Find-AceStartMenuApp $key
-    if ($lnk) {
-        try { Start-Process $lnk.FullName -ErrorAction Stop; return "Opened $($lnk.BaseName)." } catch {}
-    }
     return "Couldn't find '$Target' on this PC, bro."
 }
 

@@ -99,6 +99,7 @@ class AceHUD(QWidget):
         self.drag_position = QPoint()
         self.is_muted = False
         self._is_busy = False
+        self._cmd_seq = 0
         self.speech_engine = get_speech()
 
         self._hide_timer = QTimer(self)
@@ -109,6 +110,29 @@ class AceHUD(QWidget):
         self._init_ui()
         self._sync_window_size()
         self._start_voice_listener()
+
+        # Pre-warm PC catalog in background so first command is <1ms
+        def _warm_catalog():
+            try:
+                from . import ace_actions
+                ace_actions.scan_pc_catalog(force_refresh=True, include_store_apps=True)
+            except Exception:
+                pass
+
+        threading.Thread(target=_warm_catalog, daemon=True).start()
+
+        # Track active app window continuously (every 250ms) so Ace always knows where the user is
+        self._active_app_timer = QTimer(self)
+        self._active_app_timer.setInterval(250)
+        self._active_app_timer.timeout.connect(self._track_foreground_window)
+        self._active_app_timer.start()
+
+    def _track_foreground_window(self):
+        try:
+            from . import ace_actions
+            ace_actions.get_active_app_context()
+        except Exception:
+            pass
 
     def _init_window(self):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
@@ -293,6 +317,8 @@ class AceHUD(QWidget):
         if self._is_busy:
             return
         self._is_busy = True
+        self._cmd_seq += 1
+        my_seq = self._cmd_seq
         self.speech_engine.set_busy(True)
         self.signals.status_changed.emit("Thinking...")
 
@@ -307,18 +333,22 @@ class AceHUD(QWidget):
                 print(f"[AceHUD] Brain error: {e}")
                 reply = "Something glitched on my end, bro. Try that again."
 
+            # Release _is_busy right after thinking so typed commands are never ignored while speaking
+            self._is_busy = False
             self.signals.response_ready.emit(reply)
             self.signals.status_changed.emit("Speaking...")
             try:
                 speak(reply, interrupt=True)
                 self.speech_engine.wait_until_done(timeout=18)
-                self.speech_engine.open_follow_up()  # answer back without saying "Ace"
+                if self._cmd_seq == my_seq:
+                    self.speech_engine.open_follow_up()  # answer back without saying "Ace"
             except Exception as e:
                 print(f"[AceHUD] Speech error: {e}")
             finally:
-                self._is_busy = False
-                self.speech_engine.set_busy(False)
-                self.signals.status_changed.emit("Listening")
+                if self._cmd_seq == my_seq:
+                    self.speech_engine.set_busy(False)
+                    if not self._is_busy:
+                        self.signals.status_changed.emit("Listening")
 
         threading.Thread(target=worker, daemon=True).start()
 
