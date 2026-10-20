@@ -46,6 +46,8 @@ class SpeechEngine:
         self._recognizer = None
         self._microphone = None
         self._interrupt = threading.Event()
+        self._shutdown = threading.Event()
+        self._ps_proc = None
         self._stt_ready = False  # mic is opened lazily (CLI one-shots don't need it)
 
         # Background speech worker
@@ -108,25 +110,29 @@ class SpeechEngine:
         )
 
     def _speech_worker(self):
-        ps_proc = None
-        if os.name == "nt":
+        if os.name == "nt" and not self._shutdown.is_set():
             try:
-                ps_proc = self._start_ps_tts()
+                self._ps_proc = self._start_ps_tts()
+                if self._shutdown.is_set() and self._ps_proc is not None:
+                    self._ps_proc.kill()
+                    self._ps_proc = None
+                    return
             except Exception as e:
                 print(f"[AceSpeech] PowerShell TTS init error: {e}")
-                ps_proc = None
+                self._ps_proc = None
 
-        while True:
+        while not self._shutdown.is_set():
             text = self._speech_queue.get()
             try:
-                if not text:
+                if not text or self._shutdown.is_set():
                     continue
                 self._interrupt.clear()
                 self._is_speaking = True
 
                 if os.name == "nt":
-                    if ps_proc is None or ps_proc.poll() is not None:
-                        ps_proc = self._start_ps_tts()
+                    if self._ps_proc is None or self._ps_proc.poll() is not None:
+                        self._ps_proc = self._start_ps_tts()
+                    ps_proc = self._ps_proc
                     ps_proc.stdin.write(text.replace("\r", " ").replace("\n", " ") + "\n")
                     ps_proc.stdin.flush()
                     # Wait for __DONE__ on stdout while checking for interrupt/timeout
@@ -140,12 +146,12 @@ class SpeechEngine:
                     threading.Thread(target=_wait_line, daemon=True).start()
                     deadline = time.monotonic() + 20.0
                     while not done_evt.wait(timeout=0.1):
-                        if self._interrupt.is_set() or time.monotonic() >= deadline:
+                        if self._interrupt.is_set() or self._shutdown.is_set() or time.monotonic() >= deadline:
                             try:
                                 ps_proc.kill()
                             except Exception:
                                 pass
-                            ps_proc = None
+                            self._ps_proc = None
                             break
                 elif pyttsx3:
                     tts = pyttsx3.init()
@@ -159,7 +165,7 @@ class SpeechEngine:
                 self._speech_queue.task_done()
 
     def speak(self, text: str, interrupt: bool = False) -> None:
-        if not text or not text.strip():
+        if self._shutdown.is_set() or not text or not text.strip():
             return
         clean = re.sub(r"[\*_#`>]", "", text)
         clean = re.sub(r"\s+", " ", clean).strip()
@@ -226,14 +232,14 @@ class SpeechEngine:
             return  # already listening
 
         def audio_callback(recognizer, audio):
-            # Ignore audio while Ace is thinking, speaking, or right after speaking
-            if self._is_busy or self._is_speaking or (time.monotonic() - self._last_spoke_at < ECHO_GUARD_SEC):
+            # Ignore audio while Ace is thinking, speaking, shutting down, or right after speaking
+            if self._shutdown.is_set() or self._is_busy or self._is_speaking or (time.monotonic() - self._last_spoke_at < ECHO_GUARD_SEC):
                 return
             text = self._recognize(audio)
-            if not text:
+            if not text or self._shutdown.is_set():
                 return
             text = text.strip()
-            if self._is_busy or self._is_speaking:
+            if self._shutdown.is_set() or self._is_busy or self._is_speaking:
                 return
             print(f"[AceVoice Heard]: {text}")
 
@@ -262,6 +268,26 @@ class SpeechEngine:
                 pass
             self._stop_listening_fn = None
         self._is_listening = False
+
+    def shutdown(self):
+        """Permanently stop all voice listening, speech synthesis, and child TTS processes."""
+        self._shutdown.set()
+        self._interrupt.set()
+        self._is_busy = True
+        self._follow_up_until = 0.0
+        self.stop_listener()
+        try:
+            with self._speech_queue.mutex:
+                self._speech_queue.queue.clear()
+            self._speech_queue.put("")
+        except Exception:
+            pass
+        if self._ps_proc is not None:
+            try:
+                self._ps_proc.kill()
+            except Exception:
+                pass
+            self._ps_proc = None
 
 
 # Singleton

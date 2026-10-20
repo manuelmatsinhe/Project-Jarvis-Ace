@@ -50,7 +50,7 @@ The `ace` CLI is installed globally across your system:
 | Command | Description |
 | :--- | :--- |
 | `ace start` | Spawns Ace Dynamic Island if not already active |
-| `ace stop` | Puts Ace to sleep |
+| `ace stop` | Permanently closes Ace |
 | `ace corner <TL\|TR\|BL\|BR>` | Snaps Ace to any screen corner in real time |
 | `ace open <app\|file\|url>` | Opens any program, folder, file, or URL (e.g. `ace open notepad`, `ace open chrome`, `ace open downloads`, `ace open youtube`) |
 | `ace type <text>` | Types text directly into whatever app you have open |

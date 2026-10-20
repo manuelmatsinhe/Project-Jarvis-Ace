@@ -1,43 +1,83 @@
-# ==========================================
+# ==============================================================================
 # ACE - AI DESKTOP ASSISTANT (MAIN PROCESS)
-# ==========================================
+# ==============================================================================
 # UI Modes: "mini_man", "island", "block", "ambient"
+# Description: Main WPF UI controller, voice loop, IPC pipeline, and state manager.
+# ==============================================================================
 
+# ==============================================================================
+# BLOCK 1: HOST & ASSEMBLY IMPORTS
+# ==============================================================================
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing -ErrorAction SilentlyContinue
 
-# --- Directories & IPC Setup ---
+
+# ==============================================================================
+# BLOCK 2: DIRECTORIES, IPC SETUP & LOGGING
+# ==============================================================================
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $configDir   = Join-Path $projectRoot "config"
 $ipcDir      = Join-Path $projectRoot "ipc"
 
-if (!(Test-Path $ipcDir)) { New-Item -ItemType Directory -Path $ipcDir -Force | Out-Null }
+if (!(Test-Path $ipcDir)) {
+    New-Item -ItemType Directory -Path $ipcDir -Force | Out-Null
+}
+
 $script:QueueFile    = Join-Path $ipcDir "queue.json"
 $script:ResponseFile = Join-Path $ipcDir "response.json"
 $script:ErrorLog     = Join-Path $ipcDir "error.log"
 $script:SettingsFile = Join-Path $configDir "settings.json"
 
-function Write-AceLog { param([string]$Msg) try { Add-Content -Path $script:ErrorLog -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $Msg) } catch {} }
+function Write-AceLog {
+    param([string]$Msg)
+    try {
+        Add-Content -Path $script:ErrorLog -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $Msg)
+    } catch {}
+}
 
-# --- Core Modules ---
+
+# ==============================================================================
+# BLOCK 3: CORE MODULE DEPENDENCIES
+# ==============================================================================
 . (Join-Path $PSScriptRoot "ace_actions.ps1")
 . (Join-Path $PSScriptRoot "ace_speech.ps1")
 . (Join-Path $PSScriptRoot "ace_personality.ps1")
 . (Join-Path $PSScriptRoot "ace_brain.ps1")
 
-# --- Settings Management ---
 
+# ==============================================================================
+# BLOCK 4: SETTINGS MANAGEMENT
+# ==============================================================================
 function Get-AceSettings {
     $s = $null
-    if (Test-Path $script:SettingsFile) { try { $s = Get-Content -Raw $script:SettingsFile | ConvertFrom-Json } catch {} }
-    if (-not $s) { $s = [pscustomobject]@{} }
+    if (Test-Path $script:SettingsFile) {
+        try {
+            $s = Get-Content -Raw $script:SettingsFile | ConvertFrom-Json
+        } catch {}
+    }
+    if (-not $s) {
+        $s = [pscustomobject]@{}
+    }
     $defaults = @{ corner = "TR"; displayMode = "mini_man"; voiceEnabled = $true; nudgeMinutes = 20 }
-    foreach ($k in $defaults.Keys) { if ($null -eq $s.$k) { $s | Add-Member NoteProperty $k $defaults[$k] -Force } }
+    foreach ($k in $defaults.Keys) {
+        if ($null -eq $s.$k) {
+            $s | Add-Member NoteProperty $k $defaults[$k] -Force
+        }
+    }
     return $s
 }
-function Save-AceSettings { try { $script:S | ConvertTo-Json -Depth 5 | Set-Content -Path $script:SettingsFile -Force -Encoding UTF8 } catch {} }
+
+function Save-AceSettings {
+    try {
+        $script:S | ConvertTo-Json -Depth 5 | Set-Content -Path $script:SettingsFile -Force -Encoding UTF8
+    } catch {}
+}
+
 $script:S = Get-AceSettings
 
-# --- XAML Loading & UI Initialization ---
+
+# ==============================================================================
+# BLOCK 5: XAML INITIALIZATION & UI ELEMENT MAPPING
+# ==============================================================================
 $fs = [System.IO.File]::OpenRead((Join-Path $PSScriptRoot "ace_ui.xaml"))
 $window = [System.Windows.Markup.XamlReader]::Load($fs)
 $fs.Close()
@@ -52,41 +92,71 @@ $names = "RootContainer","MainUIBox","FullScreenBg","ContentGrid","AmbientInfo",
          "AW1","AW2","AW3","AW4","AW5","AW6","AW7","AW8","AW9"
 
 $ui = @{}
-foreach ($n in $names) { $ui[$n] = $window.FindName($n) }
+foreach ($n in $names) {
+    $ui[$n] = $window.FindName($n)
+}
 
-$script:Brush = New-Object System.Windows.Media.BrushConverter
 
+# ==============================================================================
+# BLOCK 6: RUNTIME STATE VARIABLES & ANIMATIONS
+# ==============================================================================
+$script:Brush        = New-Object System.Windows.Media.BrushConverter
+$script:Rnd          = New-Object Random
 $script:FreeMove     = $false
 $script:WorkQueue    = New-Object System.Collections.Queue
 $script:LastActivity = Get-Date
 $script:PendingType  = $null
 $script:TypeAt       = [datetime]::MaxValue
+$script:IdleAt       = [datetime]::MaxValue
+$script:Tick         = 0
 
 $anim = $window.Resources["LevitateAnim"]
-if ($anim) { $anim.Begin($ui.AvatarCanvas, $true) }
+if ($anim) {
+    $anim.Begin($ui.AvatarCanvas, $true)
+}
 
-# --- State & Layout Management ---
+
+# ==============================================================================
+# BLOCK 7: STATE & VISUAL STATUS FEEDBACK
+# ==============================================================================
 function Set-AceState {
-    param ([string]$State, [string]$Message)
-    $c = switch ($State) { "listening" { "#10B981" } "thinking" { "#F59E0B" } "acting" { "#A855F7" } default { "#FFFFFF" } }
+    param (
+        [string]$State,
+        [string]$Message
+    )
+    $c = switch ($State) {
+        "listening" { "#10B981" }
+        "thinking"  { "#F59E0B" }
+        "acting"    { "#A855F7" }
+        default     { "#FFFFFF" }
+    }
     
-    if ($ui.AvatarGlow) { $ui.AvatarGlow.Color = [System.Windows.Media.ColorConverter]::ConvertFromString($c) }
+    if ($ui.AvatarGlow) {
+        $ui.AvatarGlow.Color = [System.Windows.Media.ColorConverter]::ConvertFromString($c)
+    }
     
     if ($Message) { 
         if ($ui.IslandStatusText) { $ui.IslandStatusText.Text = $Message }
-        if ($ui.AmbientStatus) { $ui.AmbientStatus.Text = $Message }
+        if ($ui.AmbientStatus)    { $ui.AmbientStatus.Text = $Message }
     }
 }
 
+
+# ==============================================================================
+# BLOCK 8: WINDOW POSITIONING & CORNER SNAPPING
+# ==============================================================================
 function Update-Position {
     if ($script:FreeMove -or $script:S.displayMode -eq "ambient") { return }
     $wa = [System.Windows.SystemParameters]::WorkArea
-    $w = $window.ActualWidth; $h = $window.ActualHeight; $m = 12
+    $w = $window.ActualWidth
+    $h = $window.ActualHeight
+    $m = 12
     if ($w -eq 0 -or $h -eq 0) { return }
+    
     switch ($script:S.corner) {
-        "TL" { $window.Left = $wa.Left + $m;          $window.Top = $wa.Top + $m }
-        "TR" { $window.Left = $wa.Right - $w - $m;    $window.Top = $wa.Top + $m }
-        "BL" { $window.Left = $wa.Left + $m;          $window.Top = $wa.Bottom - $h - $m }
+        "TL"    { $window.Left = $wa.Left + $m;          $window.Top = $wa.Top + $m }
+        "TR"    { $window.Left = $wa.Right - $w - $m;    $window.Top = $wa.Top + $m }
+        "BL"    { $window.Left = $wa.Left + $m;          $window.Top = $wa.Bottom - $h - $m }
         default { $window.Left = $wa.Right - $w - $m; $window.Top = $wa.Bottom - $h - $m }
     }
 }
@@ -95,21 +165,30 @@ function Set-Corner {
     param ([string]$Corner)
     $c = $Corner.ToUpper().Trim()
     if ($c -notin "TL","TR","BL","BR") { return }
-    $script:S.corner = $c; $script:FreeMove = $false; Save-AceSettings; Update-Position
+    $script:S.corner = $c
+    $script:FreeMove = $false
+    Save-AceSettings
+    Update-Position
 }
 
+
+# ==============================================================================
+# BLOCK 9: DISPLAY MODE TRANSITIONS
+# ==============================================================================
 function Set-DisplayMode {
     param ([string]$Mode)
-    $script:S.displayMode = $Mode; Save-AceSettings
+    $script:S.displayMode = $Mode
+    Save-AceSettings
     
     if ($Mode -eq "ambient") {
         $window.SizeToContent = "Manual"
-        $window.Width = [System.Windows.SystemParameters]::PrimaryScreenWidth
+        $window.Width  = [System.Windows.SystemParameters]::PrimaryScreenWidth
         $window.Height = [System.Windows.SystemParameters]::PrimaryScreenHeight
-        $window.Left = 0; $window.Top = 0
+        $window.Left   = 0
+        $window.Top    = 0
         
         $ui.FullScreenBg.Visibility = "Visible"
-        $ui.AmbientInfo.Visibility = "Visible"
+        $ui.AmbientInfo.Visibility  = "Visible"
         $ui.AmbientWaveformPanel.Visibility = "Visible"
         if ($ui.AmbientNavBar) { $ui.AmbientNavBar.Visibility = "Visible" }
         $ui.TrayBorder.Visibility = "Collapsed"
@@ -127,15 +206,15 @@ function Set-DisplayMode {
         }
         
         $ui.AmbientClock.Text = (Get-Date).ToString("h:mm")
-        $ui.AmbientAmPm.Text = (Get-Date).ToString("tt")
-        $ui.AmbientDate.Text = (Get-Date).ToString("dddd, MMMM d")
+        $ui.AmbientAmPm.Text  = (Get-Date).ToString("tt")
+        $ui.AmbientDate.Text  = (Get-Date).ToString("dddd, MMMM d")
     } else {
         $window.SizeToContent = "WidthAndHeight"
-        $window.Width = [Double]::NaN
+        $window.Width  = [Double]::NaN
         $window.Height = [Double]::NaN
         
         $ui.FullScreenBg.Visibility = "Collapsed"
-        $ui.AmbientInfo.Visibility = "Collapsed"
+        $ui.AmbientInfo.Visibility  = "Collapsed"
         $ui.AmbientWaveformPanel.Visibility = "Collapsed"
         if ($ui.AmbientNavBar) { $ui.AmbientNavBar.Visibility = "Collapsed" }
         
@@ -146,7 +225,7 @@ function Set-DisplayMode {
         if ($Mode -eq "mini_man") {
             $ui.TrayBorder.Visibility = "Collapsed"
             if ($ui.AvatarViewbox) {
-                $ui.AvatarViewbox.Width = 80
+                $ui.AvatarViewbox.Width  = 80
                 $ui.AvatarViewbox.Height = 100
                 $ui.AvatarViewbox.HorizontalAlignment = "Center"
                 $ui.AvatarViewbox.VerticalAlignment = "Top"
@@ -154,11 +233,11 @@ function Set-DisplayMode {
             }
         } elseif ($Mode -eq "island") {
             $ui.TrayBorder.Visibility = "Visible"
-            $ui.BlockBody.Visibility = "Collapsed"
+            $ui.BlockBody.Visibility  = "Collapsed"
             $ui.IslandHeader.Visibility = "Visible"
             
             if ($ui.AvatarViewbox) {
-                $ui.AvatarViewbox.Width = 55
+                $ui.AvatarViewbox.Width  = 55
                 $ui.AvatarViewbox.Height = 70
                 $ui.AvatarViewbox.HorizontalAlignment = "Left"
                 $ui.AvatarViewbox.VerticalAlignment = "Top"
@@ -166,11 +245,11 @@ function Set-DisplayMode {
             }
         } elseif ($Mode -eq "block") {
             $ui.TrayBorder.Visibility = "Visible"
-            $ui.BlockBody.Visibility = "Visible"
+            $ui.BlockBody.Visibility  = "Visible"
             $ui.IslandHeader.Visibility = "Collapsed"
             
             if ($ui.AvatarViewbox) {
-                $ui.AvatarViewbox.Width = 60
+                $ui.AvatarViewbox.Width  = 60
                 $ui.AvatarViewbox.Height = 75
                 $ui.AvatarViewbox.HorizontalAlignment = "Left"
                 $ui.AvatarViewbox.VerticalAlignment = "Top"
@@ -179,33 +258,57 @@ function Set-DisplayMode {
         }
     }
     
-    # We must delay Update-Position until rendering is complete because SizeToContent takes a moment
+    # Delay Update-Position until rendering layout is complete
     $window.Dispatcher.InvokeAsync({ Update-Position }, [System.Windows.Threading.DispatcherPriority]::ContextIdle) | Out-Null
 }
 
+
+# ==============================================================================
+# BLOCK 10: MICROPHONE & VOICE CONTROLS
+# ==============================================================================
 function Set-Mic {
     param ([bool]$On)
     if ($On) {
         if (Start-AceVoiceListener) {
-            if ($ui.BtnMic) { $ui.BtnMic.Content = "Mic: ON"; $ui.BtnMic.Foreground = $script:Brush.ConvertFromString("#10B981") }
-            $script:S.voiceEnabled = $true; Save-AceSettings
+            if ($ui.BtnMic) {
+                $ui.BtnMic.Content = "Mic: ON"
+                $ui.BtnMic.Foreground = $script:Brush.ConvertFromString("#10B981")
+            }
+            $script:S.voiceEnabled = $true
+            Save-AceSettings
         } else {
-            if ($ui.BtnMic) { $ui.BtnMic.Content = "Mic: ERR"; $ui.BtnMic.Foreground = $script:Brush.ConvertFromString("#f87171") }
+            if ($ui.BtnMic) {
+                $ui.BtnMic.Content = "Mic: ERR"
+                $ui.BtnMic.Foreground = $script:Brush.ConvertFromString("#f87171")
+            }
             Write-AceLog $global:AceVoiceError
         }
     } else {
         Stop-AceVoiceListener
-        if ($ui.BtnMic) { $ui.BtnMic.Content = "Mic: OFF"; $ui.BtnMic.Foreground = $script:Brush.ConvertFromString("#94a3b8") }
-        $script:S.voiceEnabled = $false; Save-AceSettings
+        if ($ui.BtnMic) {
+            $ui.BtnMic.Content = "Mic: OFF"
+            $ui.BtnMic.Foreground = $script:Brush.ConvertFromString("#94a3b8")
+        }
+        $script:S.voiceEnabled = $false
+        Save-AceSettings
     }
 }
 
-# --- Input & Task Processing ---
+
+# ==============================================================================
+# BLOCK 11: TASK INPUT & WORK DISPATCHER
+# ==============================================================================
 function Submit-Input {
-    param ([string]$Text, [string]$Id = $null)
+    param (
+        [string]$Text,
+        [string]$Id = $null
+    )
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
     $Text = $Text.Trim()
-    if ($Text -match "^(return to pc|exit ambient|close ambient)$") { Set-DisplayMode "block"; return }
+    if ($Text -match "^(return to pc|exit ambient|close ambient)$") {
+        Set-DisplayMode "block"
+        return
+    }
     
     $script:LastActivity = Get-Date
     Set-AceState "thinking" "Thinking..."
@@ -219,199 +322,271 @@ function Invoke-Work {
         if ($res.UiCommand -match '^corner (\w\w)$') { Set-Corner $matches[1] }
         elseif ($res.UiCommand -eq "mode man")       { Set-DisplayMode "mini_man" }
         elseif ($res.UiCommand -eq "mode island")    { Set-DisplayMode "island" }
-        if ($res.TypeText) { $script:PendingType = $res.TypeText; $script:TypeAt = (Get-Date).AddSeconds(3) }
+        
+        if ($res.TypeText) {
+            $script:PendingType = $res.TypeText
+            $script:TypeAt = (Get-Date).AddSeconds(3)
+        }
+        
         Set-AceState "acting" $res.Reply
         Speak-Ace $res.Reply -Async
         $script:IdleAt = (Get-Date).AddSeconds(3)
+        
         if ($Item.Id) {
-            @{ id = $Item.Id; status = "ok"; input = $Item.Text; reply = $res.Reply; time = (Get-Date).ToString("o") } | ConvertTo-Json | Set-Content -Path $script:ResponseFile -Force -Encoding UTF8
+            @{
+                id     = $Item.Id
+                status = "ok"
+                input  = $Item.Text
+                reply  = $res.Reply
+                time   = (Get-Date).ToString("o")
+            } | ConvertTo-Json | Set-Content -Path $script:ResponseFile -Force -Encoding UTF8
         }
     } catch {
         Write-AceLog "Work error: $($_.Exception.Message)"
         Set-AceState "idle" "Error"
-        if ($Item.Id) { @{ id = $Item.Id; status = "error"; reply = $_.Exception.Message } | ConvertTo-Json | Set-Content -Path $script:ResponseFile -Force }
+        if ($Item.Id) {
+            @{
+                id     = $Item.Id
+                status = "error"
+                reply  = $_.Exception.Message
+            } | ConvertTo-Json | Set-Content -Path $script:ResponseFile -Force
+        }
     }
 }
 
-# --- UI Event Bindings ---
+
+# ==============================================================================
+# BLOCK 12: VISUAL CUSTOMIZATION (AVATAR THEME)
+# ==============================================================================
 function Toggle-AvatarColor {
     $isDark = ($ui.AvatarHead.Fill.ToString() -eq "#FF151515")
     $newFill = if ($isDark) { $script:Brush.ConvertFromString("#FAFAFA") } else { $script:Brush.ConvertFromString("#151515") }
     $eyeFill = if ($isDark) { $script:Brush.ConvertFromString("#111111") } else { $script:Brush.ConvertFromString("#FAFAFA") }
     
-    if ($ui.AvatarHead) { $ui.AvatarHead.Fill = $newFill }
-    if ($ui.AvatarBody) { $ui.AvatarBody.Fill = $newFill }
-    if ($ui.LeftArm) { $ui.LeftArm.Fill = $newFill }
-    if ($ui.RightArm) { $ui.RightArm.Fill = $newFill }
-    if ($ui.AvatarLeftLeg) { $ui.AvatarLeftLeg.Fill = $newFill }
+    if ($ui.AvatarHead)     { $ui.AvatarHead.Fill = $newFill }
+    if ($ui.AvatarBody)     { $ui.AvatarBody.Fill = $newFill }
+    if ($ui.LeftArm)        { $ui.LeftArm.Fill = $newFill }
+    if ($ui.RightArm)       { $ui.RightArm.Fill = $newFill }
+    if ($ui.AvatarLeftLeg)  { $ui.AvatarLeftLeg.Fill = $newFill }
     if ($ui.AvatarRightLeg) { $ui.AvatarRightLeg.Fill = $newFill }
-    if ($ui.LeftEye) { $ui.LeftEye.Fill = $eyeFill }
-    if ($ui.RightEye) { $ui.RightEye.Fill = $eyeFill }
-    if ($ui.AvatarTie) { $ui.AvatarTie.Fill = $eyeFill }
+    if ($ui.LeftEye)        { $ui.LeftEye.Fill = $eyeFill }
+    if ($ui.RightEye)       { $ui.RightEye.Fill = $eyeFill }
+    if ($ui.AvatarTie)      { $ui.AvatarTie.Fill = $eyeFill }
 }
 
-if ($ui.BtnRunCmd) { $ui.BtnRunCmd.Add_Click({ $t = $ui.CmdInput.Text; $ui.CmdInput.Text = ""; Submit-Input $t }) }
-if ($ui.CmdInput) { $ui.CmdInput.Add_KeyDown({ if ($_.Key -eq "Return") { $t = $ui.CmdInput.Text; $ui.CmdInput.Text = ""; Submit-Input $t } }) }
+
+# ==============================================================================
+# BLOCK 13: APPLICATION LIFECYCLE & SHUTDOWN
+# ==============================================================================
+function Exit-AcePermanently {
+    try { if ($timer) { $timer.Stop() } } catch {}
+    try { Stop-AceVoiceListener } catch {}
+    try {
+        if ($global:AceSynthesizer) {
+            $global:AceSynthesizer.SpeakAsyncCancelAll()
+            $global:AceSynthesizer.Dispose()
+        }
+    } catch {}
+    try { Remove-Item (Join-Path $ipcDir "ace.lock") -Force -ErrorAction SilentlyContinue } catch {}
+    try { $window.Close() } catch {}
+    [Environment]::Exit(0)
+}
+
+
+# ==============================================================================
+# BLOCK 14: UI EVENT HANDLERS & INTERACTIONS
+# ==============================================================================
+# Command Inputs
+if ($ui.BtnRunCmd)    { $ui.BtnRunCmd.Add_Click({ $t = $ui.CmdInput.Text; $ui.CmdInput.Text = ""; Submit-Input $t }) }
+if ($ui.CmdInput)     { $ui.CmdInput.Add_KeyDown({ if ($_.Key -eq "Return") { $t = $ui.CmdInput.Text; $ui.CmdInput.Text = ""; Submit-Input $t } }) }
 if ($ui.AmbientInput) { $ui.AmbientInput.Add_KeyDown({ if ($_.Key -eq "Return") { $t = $ui.AmbientInput.Text; $ui.AmbientInput.Text = ""; Submit-Input $t } }) }
 
-if ($ui.BtnMic) { $ui.BtnMic.Add_Click({ Set-Mic (-not $global:AceIsListening) }) }
-if ($ui.BtnScreenshot) { $ui.BtnScreenshot.Add_Click({ Submit-Input "screenshot" }) }
-if ($ui.BtnBrowser) { $ui.BtnBrowser.Add_Click({ Submit-Input "open browser" }) }
-if ($ui.BtnMode) { $ui.BtnMode.Add_Click({ Set-DisplayMode "ambient" }) }
-if ($ui.BtnPrompts) { $ui.BtnPrompts.Add_Click({ Speak-Ace "I don't have saved prompts yet." -Async }) }
-if ($ui.BtnSettings) { $ui.BtnSettings.Add_Click({ Submit-Input "open settings" }) }
+# Quick Action Buttons
+if ($ui.BtnMic)         { $ui.BtnMic.Add_Click({ Set-Mic (-not $global:AceIsListening) }) }
+if ($ui.BtnScreenshot)  { $ui.BtnScreenshot.Add_Click({ Submit-Input "screenshot" }) }
+if ($ui.BtnBrowser)     { $ui.BtnBrowser.Add_Click({ Submit-Input "open browser" }) }
+if ($ui.BtnMode)        { $ui.BtnMode.Add_Click({ Set-DisplayMode "ambient" }) }
+if ($ui.BtnPrompts)     { $ui.BtnPrompts.Add_Click({ Speak-Ace "I don't have saved prompts yet." -Async }) }
+if ($ui.BtnSettings)    { $ui.BtnSettings.Add_Click({ Submit-Input "open settings" }) }
 if ($ui.BtnToggleColor) { $ui.BtnToggleColor.Add_Click({ Toggle-AvatarColor }) }
 if ($ui.BtnAutomations) { $ui.BtnAutomations.Add_Click({ Speak-Ace "Automations not configured." -Async }) }
-if ($ui.BtnSleep) { $ui.BtnSleep.Add_Click({ Speak-Ace "Later bro." ; $window.Close() }) }
+if ($ui.BtnSleep)       { $ui.BtnSleep.Add_Click({ Exit-AcePermanently }) }
 
-if ($ui.BtnNavSolo) { $ui.BtnNavSolo.Add_Click({ Set-DisplayMode "mini_man" }) }
+# Ambient Navigation Bar
+if ($ui.BtnNavSolo)   { $ui.BtnNavSolo.Add_Click({ Set-DisplayMode "mini_man" }) }
 if ($ui.BtnNavIsland) { $ui.BtnNavIsland.Add_Click({ Set-DisplayMode "island" }) }
-if ($ui.BtnNavBlock) { $ui.BtnNavBlock.Add_Click({ Set-DisplayMode "block" }) }
-if ($ui.BtnNavExit) { $ui.BtnNavExit.Add_Click({ Speak-Ace "Later bro." ; $window.Close() }) }
+if ($ui.BtnNavBlock)  { $ui.BtnNavBlock.Add_Click({ Set-DisplayMode "block" }) }
+if ($ui.BtnNavExit)   { $ui.BtnNavExit.Add_Click({ Exit-AcePermanently }) }
 
-if ($ui.AvatarViewbox) {
-    $ui.AvatarViewbox.Add_MouseLeftButtonDown({
-        $_.Handled = $true
-        $beforeX = $window.Left
-        $beforeY = $window.Top
-        try { $window.DragMove() } catch {}
-        if ([math]::Abs($window.Left - $beforeX) -gt 3 -or [math]::Abs($window.Top - $beforeY) -gt 3) { 
-            $script:FreeMove = $true 
-        } else {
-            if ($script:S.displayMode -eq "mini_man") { Set-DisplayMode "block" }
-            elseif ($script:S.displayMode -eq "block") { Set-DisplayMode "island" }
-            else { Set-DisplayMode "mini_man" }
-        }
-    })
+# Dragging and Mode Cycling Interactions
+$onDragOrCycleMode = {
+    $_.Handled = $true
+    $beforeX = $window.Left
+    $beforeY = $window.Top
+    try { $window.DragMove() } catch {}
+    if ([math]::Abs($window.Left - $beforeX) -gt 3 -or [math]::Abs($window.Top - $beforeY) -gt 3) { 
+        $script:FreeMove = $true 
+    } else {
+        if ($script:S.displayMode -eq "mini_man")     { Set-DisplayMode "block" }
+        elseif ($script:S.displayMode -eq "block")    { Set-DisplayMode "island" }
+        else                                          { Set-DisplayMode "mini_man" }
+    }
 }
-if ($ui.TrayBorder) {
-    $ui.TrayBorder.Add_MouseLeftButtonDown({
-        $beforeX = $window.Left
-        $beforeY = $window.Top
-        try { $window.DragMove() } catch {}
-        if ([math]::Abs($window.Left - $beforeX) -gt 3 -or [math]::Abs($window.Top - $beforeY) -gt 3) { 
-            $script:FreeMove = $true 
-        } else {
-            if ($script:S.displayMode -eq "mini_man") { Set-DisplayMode "block" }
-            elseif ($script:S.displayMode -eq "block") { Set-DisplayMode "island" }
-            else { Set-DisplayMode "mini_man" }
-        }
-    })
-}
+
+if ($ui.AvatarViewbox) { $ui.AvatarViewbox.Add_MouseLeftButtonDown($onDragOrCycleMode) }
+if ($ui.TrayBorder)    { $ui.TrayBorder.Add_MouseLeftButtonDown($onDragOrCycleMode) }
+
+# Window Layout Synchronization
 $window.Add_SizeChanged({ Update-Position })
 
-# ---------------- Main loop ----------------
-$script:Tick = 0
-$script:IdleAt = [datetime]::MaxValue
+
+# ==============================================================================
+# BLOCK 15: MAIN DISPATCHER TIMER & BACKGROUND TICK LOOP
+# ==============================================================================
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(120)
+
 $timer.Add_Tick({
     try {
         $script:Tick++
         $now = Get-Date
 
-        if ($script:WorkQueue.Count -gt 0) { Invoke-Work $script:WorkQueue.Dequeue() }
+        # 1. Process Async Work Queue
+        if ($script:WorkQueue.Count -gt 0) {
+            Invoke-Work $script:WorkQueue.Dequeue()
+        }
 
+        # 2. Poll Speech-to-Text Voice Inputs
         if ($global:AceIsListening) {
             foreach ($v in (Read-AceVoiceInput)) {
                 switch ($v.Kind) {
-                    "detected" { if ($ui.IslandStatusText.Text -notlike "Thinking*") { Set-AceState "listening" "Listening..." } }
-                    "wake"     { Set-AceState "listening" "I'm listening..."; $script:IdleAt = $now.AddSeconds(10) }
-                    "command"  { Submit-Input $v.Text }
+                    "detected" {
+                        if ($ui.IslandStatusText.Text -notlike "Thinking*") {
+                            Set-AceState "listening" "Listening..."
+                        }
+                    }
+                    "wake" {
+                        Set-AceState "listening" "I'm listening..."
+                        $script:IdleAt = $now.AddSeconds(10)
+                    }
+                    "command" {
+                        Submit-Input $v.Text
+                    }
                 }
             }
         }
 
+        # 3. Poll IPC Queue File (External CLI / GUI Commands)
         if ($script:Tick % 2 -eq 0 -and (Test-Path $script:QueueFile)) {
             $raw = Get-Content -Raw $script:QueueFile -ErrorAction SilentlyContinue
             if (-not [string]::IsNullOrWhiteSpace($raw)) {
                 Set-Content -Path $script:QueueFile -Value "" -Force
                 $obj = $raw | ConvertFrom-Json
-                if ($obj.command) { Submit-Input $obj.command $obj.id }
+                if ($obj.command) {
+                    Submit-Input $obj.command $obj.id
+                }
             }
         }
 
+        # 4. Delayed Keystroke Ingestion
         if ($script:PendingType -and $now -ge $script:TypeAt) {
-            $txt = $script:PendingType; $script:PendingType = $null; $script:TypeAt = [datetime]::MaxValue
+            $txt = $script:PendingType
+            $script:PendingType = $null
+            $script:TypeAt = [datetime]::MaxValue
             Set-AceState "acting" "Typing..."
             Invoke-AceType -Text $txt
             Set-AceState "idle" "Typed it."
         }
 
+        # 5. Idle State Reset
         if ($now -gt $script:IdleAt -and -not (Test-AceSpeaking)) {
             $script:IdleAt = [datetime]::MaxValue
             Set-AceState "idle" $(if ($global:AceIsListening) { "Say 'hey Ace...'" } else { "Ready." })
         }
         
-        # Real-time Audio Waveform scaling
+        # 6. Real-time Audio Waveform Visualizer
+        $isSpeaking = (Test-AceSpeaking)
         $level = 0
-        if ($global:AceRecognizer -and $global:AceIsListening) { try { $level = $global:AceRecognizer.AudioLevel } catch {} }
+        if ($global:AceRecognizer -and $global:AceIsListening) {
+            try { $level = $global:AceRecognizer.AudioLevel } catch {}
+        }
 
-        $rnd = New-Object Random
-        if ($global:AceIsSpeaking) {
+        if ($isSpeaking) {
             if ($ui.PW1) {
-                $ui.PW1.Height = $rnd.Next(2, 20); $ui.PW2.Height = $rnd.Next(4, 25); $ui.PW3.Height = $rnd.Next(8, 30)
-                $ui.PW4.Height = $rnd.Next(10, 35); $ui.PW5.Height = $rnd.Next(8, 30); $ui.PW6.Height = $rnd.Next(4, 25)
-                $ui.PW7.Height = $rnd.Next(2, 20)
+                $ui.PW1.Height = $script:Rnd.Next(2, 20);  $ui.PW2.Height = $script:Rnd.Next(4, 25);  $ui.PW3.Height = $script:Rnd.Next(8, 30)
+                $ui.PW4.Height = $script:Rnd.Next(10, 35); $ui.PW5.Height = $script:Rnd.Next(8, 30);  $ui.PW6.Height = $script:Rnd.Next(4, 25)
+                $ui.PW7.Height = $script:Rnd.Next(2, 20)
             }
             if ($ui.BW1) {
-                $ui.BW1.Height = $rnd.Next(4, 30); $ui.BW2.Height = $rnd.Next(10, 35); $ui.BW3.Height = $rnd.Next(15, 40)
-                $ui.BW4.Height = $rnd.Next(20, 50); $ui.BW5.Height = $rnd.Next(30, 60); $ui.BW6.Height = $rnd.Next(20, 50)
-                $ui.BW7.Height = $rnd.Next(15, 40); $ui.BW8.Height = $rnd.Next(10, 35); $ui.BW9.Height = $rnd.Next(4, 30)
+                $ui.BW1.Height = $script:Rnd.Next(4, 30);  $ui.BW2.Height = $script:Rnd.Next(10, 35); $ui.BW3.Height = $script:Rnd.Next(15, 40)
+                $ui.BW4.Height = $script:Rnd.Next(20, 50); $ui.BW5.Height = $script:Rnd.Next(30, 60); $ui.BW6.Height = $script:Rnd.Next(20, 50)
+                $ui.BW7.Height = $script:Rnd.Next(15, 40); $ui.BW8.Height = $script:Rnd.Next(10, 35); $ui.BW9.Height = $script:Rnd.Next(4, 30)
             }
             if ($ui.AW1) {
-                $ui.AW1.Height = $rnd.Next(6, 40); $ui.AW2.Height = $rnd.Next(14, 50); $ui.AW3.Height = $rnd.Next(26, 60)
-                $ui.AW4.Height = $rnd.Next(42, 80); $ui.AW5.Height = $rnd.Next(56, 100); $ui.AW6.Height = $rnd.Next(42, 80)
-                $ui.AW7.Height = $rnd.Next(26, 60); $ui.AW8.Height = $rnd.Next(14, 50); $ui.AW9.Height = $rnd.Next(6, 40)
+                $ui.AW1.Height = $script:Rnd.Next(6, 40);  $ui.AW2.Height = $script:Rnd.Next(14, 50); $ui.AW3.Height = $script:Rnd.Next(26, 60)
+                $ui.AW4.Height = $script:Rnd.Next(42, 80); $ui.AW5.Height = $script:Rnd.Next(56, 100);$ui.AW6.Height = $script:Rnd.Next(42, 80)
+                $ui.AW7.Height = $script:Rnd.Next(26, 60); $ui.AW8.Height = $script:Rnd.Next(14, 50); $ui.AW9.Height = $script:Rnd.Next(6, 40)
             }
         } elseif ($level -gt 2) {
             # Scale listening waveform based on real-time microphone level (0-100)
             $factor = [math]::Min(1.0, ($level / 30.0))
-            $f = { param($max, $min) return [math]::Max($min, $max * $factor + $rnd.Next(-2, 3)) }
+            $f = { param($max, $min) return [math]::Max($min, $max * $factor + $script:Rnd.Next(-2, 3)) }
             
             if ($ui.PW1) {
-                $ui.PW1.Height = &$f 20 2; $ui.PW2.Height = &$f 25 6; $ui.PW3.Height = &$f 30 10
+                $ui.PW1.Height = &$f 20 2;  $ui.PW2.Height = &$f 25 6;  $ui.PW3.Height = &$f 30 10
                 $ui.PW4.Height = &$f 35 12; $ui.PW5.Height = &$f 30 10; $ui.PW6.Height = &$f 25 6
                 $ui.PW7.Height = &$f 20 2
             }
             if ($ui.BW1) {
-                $ui.BW1.Height = &$f 30 4; $ui.BW2.Height = &$f 35 10; $ui.BW3.Height = &$f 40 18
+                $ui.BW1.Height = &$f 30 4;  $ui.BW2.Height = &$f 35 10; $ui.BW3.Height = &$f 40 18
                 $ui.BW4.Height = &$f 50 28; $ui.BW5.Height = &$f 60 36; $ui.BW6.Height = &$f 50 28
                 $ui.BW7.Height = &$f 40 18; $ui.BW8.Height = &$f 35 10; $ui.BW9.Height = &$f 30 4
             }
             if ($ui.AW1) {
-                $ui.AW1.Height = &$f 40 6; $ui.AW2.Height = &$f 50 14; $ui.AW3.Height = &$f 60 26
-                $ui.AW4.Height = &$f 80 42; $ui.AW5.Height = &$f 100 56; $ui.AW6.Height = &$f 80 42
+                $ui.AW1.Height = &$f 40 6;  $ui.AW2.Height = &$f 50 14; $ui.AW3.Height = &$f 60 26
+                $ui.AW4.Height = &$f 80 42; $ui.AW5.Height = &$f 100 56;$ui.AW6.Height = &$f 80 42
                 $ui.AW7.Height = &$f 60 26; $ui.AW8.Height = &$f 50 14; $ui.AW9.Height = &$f 40 6
             }
         } else {
+            # Idle baseline waveforms
             if ($ui.PW1) {
-                $ui.PW1.Height = 2; $ui.PW2.Height = 6; $ui.PW3.Height = 12; $ui.PW4.Height = 18; $ui.PW5.Height = 12
-                $ui.PW6.Height = 6; $ui.PW7.Height = 2
+                $ui.PW1.Height = 2;  $ui.PW2.Height = 6;  $ui.PW3.Height = 12
+                $ui.PW4.Height = 18; $ui.PW5.Height = 12; $ui.PW6.Height = 6;  $ui.PW7.Height = 2
             }
             if ($ui.BW1) {
-                $ui.BW1.Height = 4; $ui.BW2.Height = 10; $ui.BW3.Height = 18; $ui.BW4.Height = 28; $ui.BW5.Height = 36
-                $ui.BW6.Height = 28; $ui.BW7.Height = 18; $ui.BW8.Height = 10; $ui.BW9.Height = 4
+                $ui.BW1.Height = 4;  $ui.BW2.Height = 10; $ui.BW3.Height = 18
+                $ui.BW4.Height = 28; $ui.BW5.Height = 36; $ui.BW6.Height = 28
+                $ui.BW7.Height = 18; $ui.BW8.Height = 10; $ui.BW9.Height = 4
             }
             if ($ui.AW1) {
-                $ui.AW1.Height = 6; $ui.AW2.Height = 14; $ui.AW3.Height = 26; $ui.AW4.Height = 42; $ui.AW5.Height = 56
-                $ui.AW6.Height = 42; $ui.AW7.Height = 26; $ui.AW8.Height = 14; $ui.AW9.Height = 6
+                $ui.AW1.Height = 6;  $ui.AW2.Height = 14; $ui.AW3.Height = 26
+                $ui.AW4.Height = 42; $ui.AW5.Height = 56; $ui.AW6.Height = 42
+                $ui.AW7.Height = 26; $ui.AW8.Height = 14; $ui.AW9.Height = 6
             }
         }
 
-        if ($script:Tick % 25 -eq 0 -and $ui.LeftEye) { $ui.LeftEye.Height = 2; $ui.RightEye.Height = 2 }
-        elseif ($script:Tick % 25 -eq 1 -and $ui.LeftEye) { $ui.LeftEye.Height = 10; $ui.RightEye.Height = 10 }
+        # 7. Eye Blinking Animation
+        if ($script:Tick % 25 -eq 0 -and $ui.LeftEye) {
+            $ui.LeftEye.Height = 2;  $ui.RightEye.Height = 2
+        } elseif ($script:Tick % 25 -eq 1 -and $ui.LeftEye) {
+            $ui.LeftEye.Height = 10; $ui.RightEye.Height = 10
+        }
         
-        if (Test-AceSpeaking -and $ui.RightArm) {
+        # 8. Speaking Gestures (Right Arm Movement)
+        if ($isSpeaking -and $ui.RightArm) {
             $ui.RightArm.SetValue([System.Windows.Controls.Canvas]::TopProperty, [double]$(if ($script:Tick % 4 -lt 2) { 45 } else { 50 }))
-        } elseif ($ui.RightArm) { $ui.RightArm.SetValue([System.Windows.Controls.Canvas]::TopProperty, [double]50) }
-
-        if ($script:S.displayMode -eq "ambient" -and $script:Tick % 100 -eq 0 -and $ui.AmbientClock) {
-            $ui.AmbientClock.Text = $now.ToString("h:mm")
-            $ui.AmbientAmPm.Text = $now.ToString("tt")
-            $ui.AmbientDate.Text = $now.ToString("dddd, MMMM d")
+        } elseif ($ui.RightArm) {
+            $ui.RightArm.SetValue([System.Windows.Controls.Canvas]::TopProperty, [double]50)
         }
 
+        # 9. Ambient Mode Clock & Date Update
+        if ($script:S.displayMode -eq "ambient" -and $script:Tick % 100 -eq 0 -and $ui.AmbientClock) {
+            $ui.AmbientClock.Text = $now.ToString("h:mm")
+            $ui.AmbientAmPm.Text  = $now.ToString("tt")
+            $ui.AmbientDate.Text  = $now.ToString("dddd, MMMM d")
+        }
+
+        # 10. Proactive Nudge / Work Check
         $p = Get-AceProfile
         if ($p -and $p.autonomyMode -ne "silent_executor" -and $script:S.nudgeMinutes -gt 0 -and
             ($now - $script:LastActivity).TotalMinutes -ge $script:S.nudgeMinutes) {
@@ -419,10 +594,15 @@ $timer.Add_Tick({
             $msg = Pick @("Yo $(Get-AceUserName), you good? Need me to open anything?", "Been quiet over there. What are we working on?", "Reminder: drink some water, bro. Anything I can handle for you?")
             Speak-Ace $msg -Async
         }
-    } catch { Write-AceLog "Tick error: $($_.Exception.Message)" }
+    } catch {
+        Write-AceLog "Tick error: $($_.Exception.Message)"
+    }
 })
 
-# --- Application Lifecycle ---
+
+# ==============================================================================
+# BLOCK 16: APPLICATION STARTUP & EXECUTION
+# ==============================================================================
 $window.Add_Loaded({
     try {
         Initialize-AceSpeech
@@ -431,13 +611,29 @@ $window.Add_Loaded({
         if ($script:S.voiceEnabled) { Set-Mic $true } else { Set-Mic $false }
         $n = Get-AceUserName
         $greet = Pick @("Yo $n, Ace is online.", "What's good $n! I'm up.")
-        Set-AceState "idle" $greet; Speak-Ace $greet -Async
+        Set-AceState "idle" $greet
+        Speak-Ace $greet -Async
         $script:IdleAt = (Get-Date).AddSeconds(4)
         $timer.Start()
-    } catch { Write-AceLog "Loaded error: $($_.Exception.Message)" }
-})
-$window.Add_Closing({
-    $timer.Stop(); Stop-AceVoiceListener
+    } catch {
+        Write-AceLog "Loaded error: $($_.Exception.Message)"
+    }
 })
 
-try { $window.ShowDialog() | Out-Null } catch { Write-AceLog "Fatal: $($_.Exception.Message)" }
+$window.Add_Closing({
+    try { if ($timer) { $timer.Stop() } } catch {}
+    try { Stop-AceVoiceListener } catch {}
+    try {
+        if ($global:AceSynthesizer) {
+            $global:AceSynthesizer.SpeakAsyncCancelAll()
+            $global:AceSynthesizer.Dispose()
+        }
+    } catch {}
+    try { Remove-Item (Join-Path $ipcDir "ace.lock") -Force -ErrorAction SilentlyContinue } catch {}
+})
+
+try {
+    $window.ShowDialog() | Out-Null
+} catch {
+    Write-AceLog "Fatal: $($_.Exception.Message)"
+}

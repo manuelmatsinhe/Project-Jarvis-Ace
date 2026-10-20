@@ -9,6 +9,8 @@ Features:
 - Draggable anywhere on the desktop
 - Zero-glitch layered window geometry on Windows (no QGraphicsDropShadowEffect clipping)
 """
+import os
+import re
 import sys
 import random
 import threading
@@ -99,6 +101,7 @@ class AceHUD(QWidget):
         self.drag_position = QPoint()
         self.is_muted = False
         self._is_busy = False
+        self._shutting_down = False
         self._cmd_seq = 0
         self.speech_engine = get_speech()
 
@@ -294,13 +297,50 @@ class AceHUD(QWidget):
         if menu.exec(event.globalPos()) == exit_action:
             self._exit_app()
 
+    def closeEvent(self, event):
+        event.accept()
+        if not self._shutting_down:
+            self._exit_app()
+
+    @staticmethod
+    def _is_exit_command(text: str) -> bool:
+        t = re.sub(r"[!.?]+$", "", (text or "").strip().lower())
+        return t in (
+            "exit", "quit", "q", "exit ace", "quit ace", "close ace",
+            "stop ace", "turn off ace", "shut down ace", "kill ace",
+        )
+
     def _exit_app(self):
+        if self._shutting_down:
+            os._exit(0)
+        self._shutting_down = True
+        self._is_busy = True
+        self._cmd_seq += 1
         try:
-            self.speech_engine.stop_listener()
+            self._active_app_timer.stop()
+            self._hide_timer.stop()
+            self.wave.set_active(False)
         except Exception:
             pass
-        self.close()
-        QApplication.instance().quit()
+        try:
+            self.hide()
+        except Exception:
+            pass
+        try:
+            self.speech_engine.shutdown()
+        except Exception:
+            pass
+        try:
+            (PROJECT_ROOT / "ipc" / "ace_ui.pid").unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+        except Exception:
+            pass
+        os._exit(0)
 
     # --- Interaction Logic ---
     def _on_text_submitted(self):
@@ -308,13 +348,16 @@ class AceHUD(QWidget):
         if not text:
             return
         self.input_box.clear()
-        if text.lower() in ("exit", "quit", "q"):
+        if self._is_exit_command(text):
             self._exit_app()
             return
         self._process_command(text)
 
     def _process_command(self, query: str):
-        if self._is_busy:
+        if self._is_busy or self._shutting_down:
+            return
+        if self._is_exit_command(query):
+            self._exit_app()
             return
         self._is_busy = True
         self._cmd_seq += 1
@@ -333,6 +376,9 @@ class AceHUD(QWidget):
                 print(f"[AceHUD] Brain error: {e}")
                 reply = "Something glitched on my end, bro. Try that again."
 
+            if self._shutting_down:
+                return
+
             # Release _is_busy right after thinking so typed commands are never ignored while speaking
             self._is_busy = False
             self.signals.response_ready.emit(reply)
@@ -340,12 +386,12 @@ class AceHUD(QWidget):
             try:
                 speak(reply, interrupt=True)
                 self.speech_engine.wait_until_done(timeout=18)
-                if self._cmd_seq == my_seq:
+                if not self._shutting_down and self._cmd_seq == my_seq:
                     self.speech_engine.open_follow_up()  # answer back without saying "Ace"
             except Exception as e:
                 print(f"[AceHUD] Speech error: {e}")
             finally:
-                if self._cmd_seq == my_seq:
+                if not self._shutting_down and self._cmd_seq == my_seq:
                     self.speech_engine.set_busy(False)
                     if not self._is_busy:
                         self.signals.status_changed.emit("Listening")
@@ -353,6 +399,8 @@ class AceHUD(QWidget):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_response_ready(self, reply: str):
+        if self._shutting_down:
+            return
         self.response_label.setText(reply)
         self.response_label.show()
         self._sync_window_size()
@@ -363,7 +411,10 @@ class AceHUD(QWidget):
         self._sync_window_size()
 
     def _on_voice_heard(self, text: str):
-        if self._is_busy:
+        if self._is_busy or self._shutting_down:
+            return
+        if self._is_exit_command(text):
+            self._exit_app()
             return
         self.input_box.setText(text)
         self._process_command(text)

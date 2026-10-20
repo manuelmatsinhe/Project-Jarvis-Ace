@@ -203,7 +203,7 @@
                                 <Button Name="BtnSettings" Content="Settings"/>
                                 <Button Name="BtnToggleColor" Content="Dark Avatar"/>
                                 <Button Name="BtnAutomations" Content="Automations"/>
-                                <Button Name="BtnSleep" Content="ACE Sleep" Foreground="#ff5c5c"/>
+                                <Button Name="BtnSleep" Content="Exit ACE" Foreground="#ff5c5c"/>
                             </UniformGrid>
                             
                             <!-- Input Bar -->
